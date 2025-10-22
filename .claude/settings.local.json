@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install three @react-three/fiber @react-three/drei)",
+      "Bash(npm install three @react-three/fiber @react-three/drei --legacy-peer-deps)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
