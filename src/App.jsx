@@ -61,8 +61,11 @@ function SunLight({ lightRef }) {
     if (lightRef.current) {
       lightRef.current.position.set(lightX, lightY, lightZ)
       lightRef.current.castShadow = true
-      lightRef.current.shadow.mapSize.width = 2048
-      lightRef.current.shadow.mapSize.height = 2048
+      lightRef.current.shadow.mapSize.width = 4096
+      lightRef.current.shadow.mapSize.height = 4096
+      lightRef.current.shadow.bias = -0.0001
+      lightRef.current.shadow.normalBias = 0.02
+      lightRef.current.shadow.radius = 2
       lightRef.current.shadow.camera.near = 0.5
       lightRef.current.shadow.camera.far = 50
       lightRef.current.shadow.camera.left = -10
@@ -110,7 +113,7 @@ function Model() {
     })
   }, [scene])
 
-  return <primitive object={scene} />
+  return <primitive object={scene} scale={0.5} />
 }
 
 function App() {
@@ -139,7 +142,7 @@ function App() {
       <CameraControls controlsRef={controlsRef} />
       <ambientLight intensity={0.3} />
       <SunLight lightRef={sunLightRef} />
-      <VolumetricLight sunLightRef={sunLightRef} coneAngle={45} />
+      <VolumetricLight sunLightRef={sunLightRef} coneAngle={25} />
       <Model />
       <OrbitControls ref={controlsRef} target={[0.13, 0.59, -0.31]} />
     </Canvas>

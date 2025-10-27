@@ -26,7 +26,6 @@ import {
   radians,
   Break,
   Continue,
-  smoothstep,
   Loop,
   uv
 } from 'three/tsl'
@@ -49,33 +48,71 @@ export function VolumetricLight({ sunLightRef, coneAngle = 45 }) {
     const scenePassColor = scenePass.getTextureNode()
     const scenePassDepth = scenePass.getLinearDepthNode()
 
-    // Create uniforms for volumetric lighting
-    const lightPosUniform = uniform(sunLightRef.current.position)
-    const lightDirUniform = uniform(lightDirRef.current)
-    const cameraPosUniform = uniform(camera.position)
-    const cameraFarUniform = uniform(camera.far)
+    // Polyfills for shader uniforms
+    const projectionMatrixInverse = uniform(camera.projectionMatrixInverse)
+    const lightDirection = uniform(lightDirRef.current)
+    const lightPosition = uniform(sunLightRef.current.position)
+    const viewMatrixInverse = uniform(camera.matrixWorld)
+    const cameraPosition = uniform(camera.position)
+    const cameraFar = uniform(camera.far)
     const coneAngleUniform = uniform(coneAngle)
 
-    // Helper functions for volumetric lighting
+    // Helper function to get world position from linear depth
+    const getWorldPosition = Fn(([uvCoord, linearDepth]) => {
+      // Convert UV to NDC space (-1 to 1)
+      const ndcX = uvCoord.x.mul(2.0).sub(1.0)
+      const ndcY = uvCoord.y.mul(2.0).sub(1.0)
+
+      // Create a point at far plane in NDC
+      const farPoint = vec4(ndcX, ndcY, 1.0, 1.0)
+
+      // Transform to view space to get the ray direction
+      const farView = projectionMatrixInverse.mul(farPoint)
+      const viewRayDir = normalize(farView.xyz.div(farView.w))
+
+      // Scale the view ray by the linear depth to get view position
+      const viewPos = viewRayDir.mul(linearDepth)
+
+      // Transform to world space
+      const worldPos = viewMatrixInverse.mul(vec4(viewPos, 1.0))
+
+      return worldPos.xyz
+    })
+
+    // Shadow calculation disabled - always returns 1.0 (no shadow)
+    const calculateShadow = Fn(() => {
+      return 1.0
+    })
+
     const sdCone = Fn(([p, axisOrigin, axisDir, angleRad]) => {
       const p_to_origin = p.sub(axisOrigin)
       const h = dot(p_to_origin, axisDir)
       const r = length(p_to_origin.sub(axisDir.mul(h)))
+
       const c = cos(angleRad)
       const s = sin(angleRad)
 
       const distToSurfaceLine = r.mul(c).sub(h.mul(s))
       const distToApexPlane = h.negate()
 
+      If(h.lessThan(0.0).and(distToSurfaceLine.greaterThan(0.0)), () => {
+        return length(p_to_origin)
+      })
+
       const boundaryDists = vec2(distToSurfaceLine, distToApexPlane)
+
       return length(max(boundaryDists, 0.0)).add(min(max(boundaryDists.x, boundaryDists.y), 0.0))
     })
 
+    const SCATTERING_ANISO = float(0.5)
+
     const HGPhase = Fn(([mu]) => {
-      const g = float(0.5) // SCATTERING_ANISO
+      const g = SCATTERING_ANISO
       const gg = g.mul(g)
-      const denom = add(1.0, gg).sub(mul(2.0, g).mul(mu))
-      const scatter = sub(1.0, gg).div(pow(max(denom, 0.0001), 1.5))
+      const denom = add(1.0, gg).sub(mul(2.0, g).mul(mu)).toVar()
+      denom.assign(max(denom, 0.0001))
+      const scatter = sub(1.0, gg).div(pow(denom, 1.5))
+
       return scatter
     })
 
@@ -83,61 +120,61 @@ export function VolumetricLight({ sunLightRef, coneAngle = 45 }) {
       return exp(dist.negate().mul(absorption))
     })
 
-    // Volumetric lighting effect
-    const volumetricEffect = Fn(() => {
+    const STEP_SIZE = float(0.5)
+    const NUM_STEPS = int(50)
+    const lightColor = vec3(0.2)
+    const LIGHT_INTENSITY = float(3.5)
+    const FOG_INTENSITY = float(0.1)
+
+    const mainImage = Fn(() => {
       const uvCoord = uv()
       const inputColor = scenePassColor
       const depth = scenePassDepth
-
-      // Reconstruct world position (simplified)
-      const rayOrigin = cameraPosUniform
-      const rayDir = normalize(vec3(
-        uvCoord.x.sub(0.5).mul(2.0),
-        uvCoord.y.sub(0.5).mul(2.0),
-        -1.0
-      ))
-
-      const lightPos = lightPosUniform
-      const lightDir = normalize(lightDirUniform)
+      const worldPosition = getWorldPosition(uvCoord, depth)
+      const rayOrigin = cameraPosition
+      const rayDir = normalize(worldPosition.sub(rayOrigin))
+      const sceneDepth = length(worldPosition.sub(cameraPosition))
+      const lightPos = lightPosition
+      const lightDir = normalize(lightDirection)
       const coneAngleRad = radians(coneAngleUniform)
       const halfConeAngleRad = coneAngleRad.mul(0.5)
 
-      const STEP_SIZE = float(0.1)
-      const NUM_STEPS = int(50)
-      const lightColor = vec3(1.0, 0.95, 0.8)
-      const LIGHT_INTENSITY = float(0.5)
-      const FOG_DENSITY = float(0.1)
-
-      const t = float(STEP_SIZE).toVar()
-      const transmittance = float(1.0).toVar()
+      const t = STEP_SIZE.toVar()
+      const transmittance = float(5.0).toVar()
       const accumulatedLight = vec3(0.0).toVar()
 
-      Loop({start: 0, end: NUM_STEPS}, ({i}) => {
+      Loop({ start: 0, end: NUM_STEPS }, () => {
         const samplePos = rayOrigin.add(rayDir.mul(t))
 
-        If(t.greaterThan(depth.mul(cameraFarUniform)), () => {
+        If(t.greaterThan(sceneDepth).or(t.greaterThan(cameraFar)), () => {
           Break()
         })
 
-        const sdfVal = sdCone(samplePos, lightPos, lightDir, halfConeAngleRad)
-        const shapeFactor = smoothstep(0.5, 0.0, sdfVal)
+        const shadowFactor = calculateShadow()
 
-        If(shapeFactor.lessThan(0.01), () => {
+        If(shadowFactor.equal(0.0), () => {
+          t.addAssign(STEP_SIZE)
+          Continue()
+        })
+
+        const sdfVal = sdCone(samplePos, lightPos, lightDir, halfConeAngleRad)
+        const density = sdfVal.negate()
+
+        If(density.lessThan(0.1), () => {
           t.addAssign(STEP_SIZE)
           Continue()
         })
 
         const distanceToLight = length(samplePos.sub(lightPos))
         const sampleLightDir = normalize(samplePos.sub(lightPos))
-        const attenuation = exp(float(-0.1).mul(distanceToLight))
+        const attenuation = exp(float(-0.3).mul(distanceToLight))
         const scatterPhase = HGPhase(dot(rayDir, sampleLightDir.negate()))
         const luminance = lightColor.mul(LIGHT_INTENSITY).mul(attenuation).mul(scatterPhase)
-        const stepDensity = FOG_DENSITY.mul(shapeFactor)
+        const stepDensity = FOG_INTENSITY.mul(density).toVar()
+        stepDensity.assign(max(stepDensity, 0.0))
         const stepTransmittance = BeersLaw(stepDensity.mul(STEP_SIZE), 1.0)
-
-        transmittance.mulAssign(stepTransmittance)
         accumulatedLight.addAssign(luminance.mul(transmittance).mul(stepDensity).mul(STEP_SIZE))
-
+        transmittance.mulAssign(stepTransmittance)
         t.addAssign(STEP_SIZE)
       })
 
@@ -147,8 +184,8 @@ export function VolumetricLight({ sunLightRef, coneAngle = 45 }) {
       return vec4(finalColor, 1.0)
     })
 
-    // Apply volumetric effect by calling the function
-    const volumetricPass = volumetricEffect()
+    // Apply volumetric effect
+    const volumetricPass = mainImage()
 
     // Output the volumetric lighting effect
     postProcessing.outputNode = volumetricPass
@@ -161,8 +198,6 @@ export function VolumetricLight({ sunLightRef, coneAngle = 45 }) {
     postProcessingRef.current = postProcessing
 
     console.log('Post-processing setup complete')
-    console.log('Sun light position:', sunLightRef.current.position)
-    console.log('Cone angle:', coneAngle)
 
     return () => {
       // Cleanup
